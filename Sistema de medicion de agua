@@ -1,0 +1,341 @@
+// --- LIBRERÍAS NECESARIAS ---
+#include <Wire.h> // Librería para comunicación I2C (obligatoria para la OLED)
+#include <Adafruit_GFX.h> // Librería de gráficos para pantallas Adafruit (obligatoria para la OLED)
+#include <Adafruit_SSD1306.h> // Librería específica para el controlador SSD1306 de la OLED
+
+
+// --- DEFINICIONES DE PINES (¡ATENCIÓN AQUÍ PARA TUS CONEXIONES FÍSICAS!) ---
+
+// Pines del Sensor Ultrasónico (HC-SR04)
+const int triggerPin = 9; // Pin TRIGGER del sensor (salida)
+const int echoPin = 13;   // Pin ECHO del sensor (entrada)
+
+// Pin del Relé que controla la Bomba de Agua
+const int pinBomba = 5;  // Pin de control del relé de la bomba
+
+// Pines de los LEDs de Nivel de Agua (los 4 LEDs principales, usando pines analógicos como digitales)
+const int ledNivel1 = 10;  // LED para Nivel 1 (el más bajo)
+const int ledLevel2 = 11; // LED para el nivel 2
+const int ledLevel3 = 12; // LED para el nivel 3
+const int ledNivel4 = A1;  // LED para Nivel 4 (el más alto / crítico)
+
+// Pin del 5º LED: Indicador Visual de que la Bomba está ENCENDIDA
+const int ledPumpIndicator = A0; // Pin analógico 1
+
+// Pin para la Simulación del Buzzer (¡usas un LED en lugar del buzzer real!)
+const int zumbadorPin = A3; // Pin Digital 5 (Este LED simulará los sonidos del zumbador)
+
+
+// --- CONFIGURACIÓN DE LA PANTALLA OLED ---
+#define SCREEN_WIDTH 128 // Ancho de la pantalla OLED en píxeles (comúnmente 128)
+#define SCREEN_HEIGHT 64 // Alto de la pantalla OLED en píxeles (puede ser 32 o 64, revisa tu modelo)
+
+// Declaración del objeto OLED. Conexión I2C (Wire), sin uso pin de reset (-1)
+// NOTA: Se ha corregido 'pantalla', 'ANCHO_PANTALLA', 'ALTO_PANTALLA' y '&Cable'
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// Dirección I2C de la OLED. Las más comunes son 0x3C o 0x3D. Prueba 0x3C primero.
+#define OLED_I2C_ADDRESS 0x3C
+
+
+// --- UMBRALES DE NIVEL DE AGUA (¡AJÚSTALOS A LAS DIMENSIONES REALES DE TU TANQUE!) ---
+// La distancia se mide desde el sensor (arriba) hasta la superficie del agua.
+// A MENOR distancia, MÁS agua. A MAYOR distancia, MENOS agua.
+
+// NOTA: Se ha corregido el tipo 'flotador constante' a 'const float'
+const float UMBRAL_VACIO_CM = 18.0;  // Si la distancia es MAYOR que esto, el tanque está VACÍO
+const float UMBRAL_BAJO_CM = 14.0;   // Si la distancia es MENOR o igual a esto, Nivel 1 LED (y superiores)
+const float UMBRAL_MEDIO_CM = 10.0;  // Si la distancia es MENOR o igual a esto, Nivel 2 LEDs (y superiores)
+const float UMBRAL_PRE_LLENO_CM = 6.0; // Si la distancia es MENOR o igual a esto, Nivel 3 LEDs (y superiores)
+
+// Umbral para ENCENDER la bomba (agua muy alta, riesgo de rebalse)
+// NOTA: Se ha corregido el tipo 'constante flotador' a 'const float'
+const float UMBRAL_ENCENDIDO_BOMBA_CM = 5.0; // Cuando el agua llega a esta distancia, la bomba se enciende
+
+// Umbral para APAGAR la bomba (cuando el agua ha bajado lo suficiente)
+// NOTA: Se ha corregido el tipo 'flotador constante' a 'const float'
+const float UMBRAL_APAGADO_BOMBA_CM = 10.0; // Cuando el agua baja hasta esta distancia, la bomba se apaga
+
+
+// --- VARIABLES GLOBALES (almacenan el estado del sistema) ---
+// NOTA: Se ha corregido el tipo 'mucho tiempo' a 'long' y se ha renombrado a 'duration'
+long duration;  // Almacena la duración del pulso del sensor (en microsegundos)
+// NOTA: Se ha corregido el tipo 'distancia flotanteCm' a 'float' y se ha renombrado a 'distanceCm'
+float distanceCm; // Almacena la distancia calculada (en centímetros)
+bool bombaActivada = false; // TRUE si la bomba está funcionando, FALSE si está apagada
+int anteriorLedLevel = 0; // Utilizado para detectar cambios de nivel y activar el "pitido" del buzzer (LED)
+
+
+// --- PROTOTIPOS DE FUNCIONES (declaran las funciones antes de usarlas) ---
+void medir(); // Función para medir la distancia con el sensor ultrasónico
+void indicador_nivel_y_alarmas(); // Función principal para controlar LEDs, bomba y zumbador
+void actualizarOLED(); // Función para actualizar la información en la pantalla OLED
+
+
+// --- FUNCIÓN SETUP (se ejecuta una sola vez al inicio) ---
+void setup() {
+  // Configuración de todos los pinos de los LED como SALIDA
+  // NOTA: Se ha corregido 'SALIDA' a 'OUTPUT'
+  pinMode(ledNivel1, OUTPUT);
+  pinMode(ledLevel2, OUTPUT);
+  pinMode(ledLevel3, OUTPUT);
+  pinMode(ledNivel4, OUTPUT);
+  // NOTA: Se ha corregido 'ledBombaIndicador' a 'ledPumpIndicator'
+  pinMode(ledPumpIndicator, OUTPUT); // El 5to LED
+  // NOTA: Se ha corregido 'OUTPUT'
+  pinMode(zumbadorPin, OUTPUT); // El LED que simula el buzzer
+  // NOTA: Se ha corregido 'escritura digital' a 'digitalWrite' y 'BAJO' a 'LOW'
+  digitalWrite(zumbadorPin, LOW);  // Asegurarse de que el "buzzer" esté apagado al inicio
+
+  // Configuración del pin de la Bomba como SALIDA
+  // NOTA: Se ha corregido 'SALIDA' a 'OUTPUT'
+  pinMode(pinBomba, OUTPUT);
+  // NOTA: Se ha corregido 'escritura digital' a 'digitalWrite' y 'BAJO' a 'LOW'
+  digitalWrite(pinBomba, LOW);  // Asegurarse de que la bomba esté apagada al inicio
+
+  // Configuración de los pines del Sensor Ultrasónico
+  // NOTA: Se ha corregido 'ENTRADA' y 'SALIDA' a 'INPUT' y 'OUTPUT'
+  pinMode(echoPin, INPUT);   // Pin Echo como ENTRADA
+  pinMode(triggerPin, OUTPUT); // Pin Trigger como SALIDA
+
+  // Inicialización de la comunicación Serial (para depuración en el Monitor Serial del IDE)
+  Serial.begin(9600);
+  delay(100); // Pequeña pausa para que la comunicación se inicialice
+
+  // Inicialización de la pantalla OLED I2C
+  // Intentará iniciar con la dirección 0x3C. Si falla, imprimirá un error.
+  // NOTA: Se ha corregido 'display' (objeto ya declarado correctamente)
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS)) {
+    Serial.println(F("Error: OLED SSD1306 no encontrado. Revisa conexiones y direcciones (0x3C o 0x3D)."));
+    // NOTA: Se ha corregido 'párrafo (;;)' a 'while(true);' para detener el programa.
+    while (true); // Detener el programa aquí si la OLED no se detecta
+  }
+
+  // Mensaje de Bienvenida en la Pantalla OLED
+  display.clearDisplay();  // Limpia la pantalla
+  display.setTextSize(1);  // Tamaño de texto pequeño
+  display.setTextColor(SSD1306_WHITE); // Color blanco
+  display.setCursor(0, 0);  // Posición inicial (llegada a la izquierda)
+  // NOTA: Se ha corregido 'mostrar.println' a 'display.println'
+  display.println(F("Sistema EDECO-TECH"));
+  display.setCursor(0, 10);  // Siguiente línea
+  display.println(F("Iniciando..."));
+  display.display();   // Muestra lo que está en el buffer
+  delay(200);      // Deja el mensaje visible por 2 segundos
+}
+
+
+// --- FUNCIÓN LOOP (se ejecuta repetidamente) ---
+// NOTA: Se ha corregido 'frío vacío()' a 'void loop()'
+void loop() {
+  // 1. Realizar la medición de distancia con el sensor
+  medir();
+
+  // 2. Imprimir la distancia en el Monitor Serial (ayuda para depurar)
+  Serial.print("Distancia: ");
+  // NOTA: Se ha corregido 'distanciaCm' a 'distanceCm'
+  Serial.print(distanceCm);
+  Serial.println(" cm");
+
+  // 3. Controlar los LED de nivel, la bomba y el LED que simula el zumbador
+  indicador_nivel_y_alarmas();
+
+  // 4. Actualizar toda la información en la pantalla OLED
+  actualizarOLED();
+
+  // Pequeña pausa para estabilizar las lecturas y no sobrecargar el sistema
+  // NOTA: Se ha corregido 'retraso' a 'delay'
+  delay(200);
+}
+
+
+// --- IMPLEMENTACIÓN DE FUNCIONES ---
+
+// Función: medir()
+// Objetivo: Obtener la distancia en centímetros usando el sensor ultrasónico
+void medir() {
+  // Paso 1: Enviar un pulso corto al pin TRIGGER para iniciar la medición
+  // NOTA: Se ha corregido 'escritura digital', 'pin de disparo', 'BAJO', 'ALTO'
+  digitalWrite(triggerPin, LOW); // Asegura que el pin Trigger esté bajo
+  // NOTA: Se ha corregido 'retrasoMicrosegundos' y 'retardoMicrosegundos' a 'delayMicroseconds'
+  delayMicroseconds(2);  // Pequeña pausa
+  digitalWrite(triggerPin, HIGH); // Envía un pulso alto de 10 microsegundos
+  delayMicroseconds(10);
+  digitalWrite(triggerPin, LOW); // Apaga el pin Trigger
+
+  // Paso 2: Medir la duración del pulso de retorno en el pin ECHO
+  // pulseIn() mide el tiempo en microsegundos que el pin ECHO permanece en ALTO
+  // NOTA: Se ha corregido 'tiempo' a 'duration' y 'ALTO' a 'HIGH'
+  duration = pulseIn(echoPin, HIGH);
+
+  // Paso 3: Calcular la distancia
+  // Velocidad del sonido en el aire es aproximadamente 0.0343 cm/microsegundo.
+  // Dividimos por 2 porque 'duration' es el viaje de ida y vuelta del sonido.
+  // NOTA: Se ha corregido 'distanciaCm' y 'tiempo'
+  distanceCm = (duration * 0.0343) / 2.0;
+
+  // Opcional: Asegurar que la distancia sea un valor razonable (evita lecturas extremas)
+  // Puedes ajustar estos valores según el rango de tu tanque y sensor
+  // NOTA: Se ha corregido 'si' a 'if' y 'distanciaCm' a 'distanceCm'
+  if (distanceCm < 0 || distanceCm > 200) {
+    distanceCm = 200; // Si es inválido, asigna un valor máximo o un indicador de error
+  }
+}
+
+
+// Función: indicador_nivel_y_alarmas()
+// Objetivo: Controlar los LEDs de nivel, la bomba y el LED que simula el zumbador
+// según la distancia de agua detectada.
+void indicador_nivel_y_alarmas() {
+  // --- Control de LEDs de Nivel ---
+  // Primero, apaga todos los LEDs de nivel para empezar "limpio" en cada ciclo
+  // NOTA: Se han corregido 'escritura digital' a 'digitalWrite' y 'BAJO' a 'LOW'
+  digitalWrite(ledNivel1, LOW);
+  digitalWrite(ledLevel2, LOW);
+  digitalWrite(ledLevel3, LOW);
+  digitalWrite(ledNivel4, LOW);
+
+  // Variable para saber cuántos LED de nivel están encendidos actualmente
+  // NOTA: Se ha corregido 'nivelLedactual' a 'currentLedLevel'
+  int currentLedLevel = 0;
+
+  // Lógica para encender los LED según el nivel de agua (los LED se encienden acumulativamente)
+  // NOTA: Se ha corregido 'distanciaCm' a 'distanceCm'
+  if (distanceCm <= UMBRAL_ENCENDIDO_BOMBA_CM) { // Nivel muy lleno / crítico (riesgo de rebalse)
+    // NOTA: Se han corregido 'escritura digital' a 'digitalWrite' y 'ALTO' a 'HIGH'
+    digitalWrite(ledNivel1, HIGH);
+    digitalWrite(ledLevel2, HIGH);
+    digitalWrite(ledLevel3, HIGH);
+    digitalWrite(ledNivel4, HIGH); // Los 4 LED encendidos
+    // NOTA: Se ha corregido 'nivelLedactual'
+    currentLedLevel = 4;
+  // NOTA: Se ha corregido 'sino si' a 'else if' y 'distanciaCm'
+  } else if (distanceCm <= UMBRAL_PRE_LLENO_CM) { // Nivel casi lleno
+    digitalWrite(ledNivel1, HIGH);
+    digitalWrite(ledLevel2, HIGH);
+    digitalWrite(ledLevel3, HIGH);
+    currentLedLevel = 3;
+  // NOTA: Se ha corregido 'sino si' a 'else if' y 'distanciaCm'
+  } else if (distanceCm <= UMBRAL_MEDIO_CM) { // Nivel medio
+    digitalWrite(ledNivel1, HIGH);
+    digitalWrite(ledLevel2, HIGH);
+    currentLedLevel = 2;
+  // NOTA: Se ha corregido 'si no' a 'else if' y 'distanciaCm'
+  } else if (distanceCm <= UMBRAL_BAJO_CM) { // Nivel bajo
+    digitalWrite(ledNivel1, HIGH);
+    currentLedLevel = 1;
+  }
+  // Si la distancia es mayor a UMBRAL_VACIO_CM, no se enciende ningún LED (currentLedLevel = 0)
+
+  // --- Control del "Buzzer" (LED de reemplazo) por Subida de Nivel ---
+  // Si el nivel de encendido del LED ha AUMENTADO y no es la primera lectura
+  // NOTA: Se ha corregido 'si', 'nivelLedActual', 'nivelLedAnterior'
+  if (currentLedLevel > anteriorLedLevel) {
+    // NOTA: Se ha corregido 'escritura digital', 'pin del zumbador' y 'ALTO'
+    digitalWrite(zumbadorPin, HIGH); // Enciende el LED para simular un "pitido"
+    // NOTA: Se ha corregido 'retraso' a 'delay'
+    delay(50); // Duración 50 milisegundos
+    digitalWrite(zumbadorPin, LOW); // Apaga el LED
+    Serial.println(">>> Nivel de agua subiendo (pitido).");
+  }
+  // NOTA: Se ha corregido 'nivelLedanterior' y 'nivelLedactual'
+  anteriorLedLevel = currentLedLevel; // Actualiza el nivel anterior para el próximo ciclo
+
+
+  // --- Control de la Bomba de Agua y su LED Indicador (con histéresis) ---
+  bool anteriorBombaActivada = bombaActivada; // Guarda el estado de la bomba antes de la lógica
+
+  // Lógica de histéresis para ENCENDER la bomba:
+  // Si la bomba NO estaba activada Y el nivel de agua es CRÍTICO (muy alto)
+  // NOTA: Se ha corregido 'distanciaCm'
+  if (!bombaActivada && distanceCm <= UMBRAL_ENCENDIDO_BOMBA_CM) {
+    // NOTA: Se ha corregido 'escritura digital' y 'ALTA'
+    digitalWrite(pinBomba, HIGH); // ¡ENCIENDE LA BOMBA!
+    bombaActivada = true;
+    Serial.println("!!! Bomba ENCENDIDA por nivel alto !!!");
+  }
+  // Lógica de histéresis para APAGAR la bomba:
+  // Si la bomba SÍ estaba activada Y el nivel de agua ha bajado lo suficiente
+  // NOTA: Se ha corregido 'else if' y 'distanciaCm'
+  else if (bombaActivada && distanceCm >= UMBRAL_APAGADO_BOMBA_CM) {
+    // NOTA: Se ha corregido 'escritura digital' y 'BAJO'
+    digitalWrite(pinBomba, LOW); // ¡APAGA LA BOMBA!
+    bombaActivada = false;
+    Serial.println("--- Bomba APAGADA por nivel bajo ---");
+  }
+
+  // Actualizar el 5º LED (ledPumpIndicator) para mostrar el estado real de la bomba
+  // NOTA: Se ha corregido 'ledBombaIndicador', 'ALTA' y 'BAJA'
+  digitalWrite(ledPumpIndicator, bombaActivada ? HIGH : LOW); // Si bombaActivada es TRUE, LED HIGH; sino, LOW
+
+
+  // --- Control del "Buzzer" (LED de reemplazo) por Estado de la Bomba ---
+  if (bombaActivada && !anteriorBombaActivada) {
+    // Si la bomba se acaba de encender, mantenga el LED del "buzzer" ENCENDIDO continuamente
+    digitalWrite(zumbadorPin, HIGH);
+    Serial.println(">>> Zumbador (LED) ENCENDIDO: Bomba activa.");
+  } else if (!bombaActivada && anteriorBombaActivada) {
+    // Si la bomba se acaba de apagar, apaga el LED del "buzzer"
+    digitalWrite(zumbadorPin, LOW);
+    Serial.println("<<< Zumbador (LED) APAGADO: Bomba inactiva.");
+  }
+  // Importante: Si la bomba sigue encendida, el LED del timbre se mantendrá encendido.
+  // Si la bomba sigue apagada, el LED del timbre permanecerá apagado (excepto por los pitidos de nivel).
+}
+
+
+// Función: actualizarOLED()
+// Objetivo: Mostrar la distancia, el nivel de agua en texto y el estado de la bomba en la pantalla OLED.
+void actualizarOLED() {
+  display.clearDisplay(); // Borra todo el contenido anterior de la pantalla
+
+  // --- Mostrar la Distancia en Centímetros ---
+  display.setTextSize(1); // Tamaño de texto normal
+  display.setTextColor(SSD1306_WHITE); // Color blanco
+  display.setCursor(0, 0); // Posición inicial (llegada a la izquierda)
+  display.println(F("Distancia:"));
+
+  display.setTextSize(2); // Texto más grande para el valor de la distancia
+  display.setCursor(0, 15); // Posición para el valor (ajustar si tu pantalla es 128x32)
+  // NOTA: Se ha corregido 'distanciaCm' a 'distanceCm'
+  display.print(distanceCm, 1); // Muestra la distancia con un decimal
+  // NOTA: Se ha corregido 'mostrar.println' a 'display.println'
+  display.println(F(" cm"));
+
+
+  // --- Mostrar el Nivel de Agua en Texto ---
+  String nivelTexto = "Vacio"; // Por defecto es "Vacio"
+  // NOTA: Se ha corregido 'si', 'sino si', 'si no' y 'distanciaCm' a 'distanceCm'
+  if (distanceCm <= UMBRAL_ENCENDIDO_BOMBA_CM) {
+    nivelTexto = "LLENO / CRÍTICO";
+  } else if (distanceCm <= UMBRAL_PRE_LLENO_CM) {
+    nivelTexto = "PRE-LLENO";
+  } else if (distanceCm <= UMBRAL_MEDIO_CM) {
+    nivelTexto = "MEDIO";
+  } else if (distanceCm <= UMBRAL_BAJO_CM) {
+    nivelTexto = "BAJO";
+  }
+
+  display.setTextSize(1); // Tamaño de texto normal
+  display.setCursor(0, 40); // Posición para el nivel de texto
+  // NOTA: Se ha corregido 'mostrar.imprimir' a 'display.print'
+  display.print(F("Nivel: "));
+  // NOTA: Se ha corregido 'cinco.println(textoDeNivel)' a 'display.println(nivelTexto)'
+  display.println(nivelTexto);
+
+
+  // --- Mostrar el Estado de la Bomba ---
+  display.setCursor(0, 52); // Posición para el estado de la bomba
+  // NOTA: Se ha corregido 'mostrar.imprimir' a 'display.print'
+  display.print(F("Bomba: "));
+  if (bombaActivada) {
+    // NOTA: Se ha corregido 'mostrar.println' a 'display.println'
+    display.println(F("ENCENDIDA"));
+  // NOTA: Se ha corregido 'demás' a 'else'
+  } else {
+    // NOTA: Se ha corregido 'mostrar.println' a 'display.println' y el texto 'ELIMINADO' a 'APAGADA'
+    display.println(F("APAGADA"));
+  }
+
+  display.display(); // Envía todos los comandos al buffer de la pantalla para que se muestre
+}
